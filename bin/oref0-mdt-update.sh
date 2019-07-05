@@ -7,6 +7,7 @@ source $(dirname $0)/oref0-bash-common-functions.sh || (echo "ERROR: Failed to r
 FILE_MDT='monitor/cgm-mm-glucosedirty.json'
 FILE_POST_TREND='cgm/cgm-glucose.json'
 FILE_FINAL='cgm/glucose.json'
+FILE_NS_SYNC='/tmp/oref-mdt-ns-sync-successfull'
 
 CS_TIME_SENSE=1
 
@@ -91,34 +92,49 @@ function glucose_lt_1h_old {
 # Removes old cgm data file and requests cgm history from pump
 function full_refresh {
     clean_files
-    if ! wait_for_silence $CS_TIME_SENSE ; then echo "Radio jammed"; exit 1; fi
-    cgmupdate -f $FILE_MDT -u -b 30h -k 48h 2>&1
-    EXIT_CODE=$?
-    if [ "$EXIT_CODE" -eq "0" ]; then
-        trend_and_copy
-    elif [ "$EXIT_CODE" -eq "2" ]; then
-        echo "failed to upload cgm to nightscout"
-        trend_and_copy
-    else 
-        echo "cgm full refresh failed."
-        exit 1
-    fi
+    update_data "30h"
 }
 
 # Updates local cgm data with just the last hour of pump request
 function update_data {
-    if ! wait_for_silence $CS_TIME_SENSE ; then echo "Radio jammed"; exit 1; fi
-    cgmupdate -f $FILE_MDT -u -b 1h -k 48h 2>&1
-    EXIT_CODE=$?
-    if [ "$EXIT_CODE" -eq "0" ]; then
-        trend_and_copy
-    elif [ "$EXIT_CODE" -eq "2" ]; then
-        echo "failed to upload cgm to nightscout"
-        trend_and_copy
-    else 
-        echo "cgm data update failed."
-        exit 1
+    if [ $# -eq 0 ]; then
+        AMMOUNT_OF_TIME_TO_SYNC=1h
+
+        # upload missing entrys from offline time
+        NS_TIME_TO_SYNC = $AMMOUNT_OF_TIME_TO_SYNC;
+        if [ -f $FILE_NS_SYNC ]; then
+            DIFF_SECONDS=$(expr $(date +%s) - $(stat -c %Y $FILE_NS_SYNC))
+            if [ "$DIFF_SECONDS" -gt "3600" ]; then
+			    NS_TIME_TO_SYNC="$(DIFF_SECONDS)s"
+            fi			
+        fi 
+    else
+        AMMOUNT_OF_TIME_TO_SYNC=$1
+        NS_TIME_TO_SYNC = $AMMOUNT_OF_TIME_TO_SYNC;
     fi
+    
+    RETRIES=0
+    EXIT_CODE=3
+    while [  $RETRIES -lt 5 ]; do
+        if ! wait_for_silence $CS_TIME_SENSE ; then echo "Radio jammed"; exit 1; fi
+        cgmupdate -f $FILE_MDT -u -b $AMMOUNT_OF_TIME_TO_SYNC -w $NS_TIME_TO_SYNC -k 48h 2>&1
+    
+        EXIT_CODE=$?
+        if [ "$EXIT_CODE" -eq "0" ]; then
+	        touch $FILE_NS_SYNC
+            trend_and_copy
+			return
+        elif [ "$EXIT_CODE" -eq "2" ]; then
+            echo "failed to upload cgm to nightscout"
+            trend_and_copy
+			return
+        fi
+		
+        let RETRIES=RETRIES+1 
+    done
+	
+    echo "cgm data update failed."
+    exit 1	
 }
 
 # Converts cgmupdate output to a format OpenAPS understands
